@@ -57,7 +57,8 @@ const S = {
 const canvas = $('#cv');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setClearColor(0x14171b, 1);
+let BG = 0x14171b;
+renderer.setClearColor(BG, 1);
 const scene = new THREE.Scene();
 const persp = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
 const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, -10000, 10000);
@@ -376,7 +377,7 @@ function pickId(x, y) {
   const xr = uniforms.uXray.value; uniforms.uXray.value = 0;
   renderer.setRenderTarget(pickRT); renderer.setClearColor(0, 0); renderer.clear(); renderer.render(scene, camera);
   renderer.readRenderTargetPixels(pickRT, 0, 0, 1, 1, pickBuf);
-  renderer.setRenderTarget(null); renderer.setClearColor(0x14171b, 1);
+  renderer.setRenderTarget(null); renderer.setClearColor(BG, 1);
   scene.overrideMaterial = null; overlay.visible = true; uniforms.uXray.value = xr;
   camera.clearViewOffset();
   if (camera === ortho) updateOrtho();
@@ -868,7 +869,7 @@ function setGrid(on) {
     const pts = []; const z = S.manifest.gridZ ?? 0;
     for (const [tag, a, b] of S.manifest.grids) { pts.push(a[0], a[1], z, b[0], b[1], z); }
     const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    gridObj = new THREE.LineSegments(g, new THREE.LineDashedMaterial({ color: 0x5b8fd6, dashSize: 1.2, gapSize: 0.6, transparent: true, opacity: 0.9 }));
+    gridObj = new THREE.LineSegments(g, new THREE.LineDashedMaterial({ color: document.documentElement.dataset.theme === 'light' ? 0x2b62b0 : 0x5b8fd6, dashSize: 1.2, gapSize: 0.6, transparent: true, opacity: 0.9 }));
     gridObj.computeLineDistances(); overlay.add(gridObj);
   }
   if (gridObj) gridObj.visible = on; redraw();
@@ -901,6 +902,19 @@ function updateLabels() {
   }
   for (let i = k; i < labelPool.length; i++) labelPool[i].style.display = 'none';
 }
+
+/* ---- light / dark background ---- */
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  BG = t === 'light' ? 0xeef0f3 : 0x14171b; renderer.setClearColor(BG, 1);
+  if (secHelper) secHelper.material.color.set(t === 'light' ? 0xe0672b : 0xef7a3c);
+  if (gridObj) gridObj.material.color.set(t === 'light' ? 0x2b62b0 : 0x5b8fd6);
+  $('#b-theme').textContent = t === 'light' ? '☾ 深色' : '☀ 淺色';
+  try { localStorage.setItem('cdc-theme', t); } catch (e) {}
+  redraw();
+}
+$('#b-theme').onclick = () => setTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+try { const t = localStorage.getItem('cdc-theme'); if (t) setTheme(t); } catch (e) {}
 
 /* ---- modals & keys ---- */
 $('#b-help').onclick = () => $('#m-help').classList.add('on');
