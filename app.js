@@ -420,7 +420,7 @@ function viewPreset(v) {
 function orbit(dx, dy, pivot) {
   const rotZ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -dx * 0.005);
   const fwd = target.clone().sub(camera.position); const right = new THREE.Vector3().crossVectors(fwd, camera.up).normalize();
-  let ang = -dy * 0.005;
+  let ang = dy * 0.005; // drag down → camera rises (see more of the top), like Revit / OrbitControls
   // clamp pitch
   const elev = Math.asin(THREE.MathUtils.clamp(-fwd.clone().normalize().z, -1, 1));
   if (elev + ang > 1.565) ang = 1.565 - elev; if (elev + ang < -1.565) ang = -1.565 - elev;
