@@ -88,7 +88,7 @@ void main(){
   vec3 L1=normalize(vec3(0.45,-0.6,0.75)); vec3 L2=normalize(vec3(-0.6,0.5,0.3));
   float li=0.42+0.42*max(dot(n,L1),0.0)+0.16*max(dot(n,L2),0.0)+0.10*n.z+0.08*max(dot(n,v),0.0);
   vec3 c=vCol.rgb*li; float a=vCol.a;
-  if(vSt>1.5){ c=mix(c,vec3(1.0,0.48,0.16),0.55)+0.06; a=max(a,0.9); }
+  if(vSt>1.5){ vec3 hc = vSt<2.5 ? vec3(1.0,0.48,0.16) : vSt<3.5 ? vec3(1.0,0.82,0.0) : vec3(0.10,0.62,1.0); c=mix(c,hc,vSt<2.5?0.55:0.7)+0.06; a=max(a,0.92); }
   else if(uXray>0.5){ c=mix(vec3(0.62,0.70,0.82)*li,c,0.25); a=0.07; }
   fragColor=vec4(c,a);
 }`;
@@ -195,6 +195,7 @@ async function init() {
   for (const s of defaults) { await loadSub(s, (f, msg) => setLoad(`${s.name}：${msg}（${k + 1}/${defaults.length}）`, 0.3 + 0.7 * (k + f) / defaults.length)); k++; }
   endLoad();
   viewPreset('iso');
+  initIssues();
 }
 
 async function loadSub(sub, prog = () => {}) {
@@ -331,6 +332,7 @@ function applyColors(onlySub) {
 }
 function elemVisible(gi) {
   const e = S.elems[gi];
+  if (S.issueA && (S.issueA.has(gi) || S.issueB.has(gi))) return true;
   if (!S.classOn.get(e.cls)) return false;
   if (S.hidden.has(gi)) return false;
   if (S.isolated && !S.isolated.has(gi)) return false;
@@ -346,7 +348,7 @@ function refreshStates() {
     if (!sub.visible) continue;
     for (let li = 0; li < sub.n; li++) {
       const gi = sub.base + li, e = S.elems[gi]; if (!e.r) continue;
-      const vis = elemVisible(gi); const v = !vis ? 1 : S.sel.has(gi) ? 2 : 0;
+      const vis = elemVisible(gi); const v = !vis ? 1 : S.sel.has(gi) ? 2 : S.issueA.has(gi) ? 3 : S.issueB.has(gi) ? 4 : 0;
       for (let q = 0; q < e.r.length; q += 6) {
         const ch = S.chunks[e.r[q]]; ch.st.fill(v, e.r[q + 1], e.r[q + 1] + e.r[q + 2]);
         if (vis) tris += e.r[q + 4] / 3;
@@ -604,6 +606,7 @@ $$('#tabs .tab').forEach(t => t.onclick = () => {
   $$('#tabs .tab').forEach(x => x.classList.toggle('on', x === t));
   $$('.pane').forEach(p => p.classList.toggle('on', p.id === 'p-' + t.dataset.t));
   if (t.dataset.t === 'stat') renderStats();
+  if (t.dataset.t === 'iss') renderIssues();
   if (t.dataset.t === 'find') $('#q').focus();
 });
 function buildUI() { renderSubList(); renderLevels(); renderClassList(); renderTree(); renderStats(); renderInfo(); }
@@ -1026,8 +1029,9 @@ $('#b-info').onclick = () => $('#m-info').classList.add('on');
 $$('.modal').forEach(m => m.addEventListener('click', e => { if (e.target === m || e.target.hasAttribute('data-close')) m.classList.remove('on'); }));
 $('#compass').onclick = () => viewPreset('top');
 addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
   const k = e.key.toLowerCase();
+  if (S.present && ['arrowleft', 'arrowright', 'pageup', 'pagedown', 'escape'].includes(k)) return;
   if (k === 'escape') { $$('.modal').forEach(m => m.classList.remove('on')); if (S.measure) { if (S.measure.a) { S.measure.a = null; drawMeasures(); tipText(); } else setMeasure(false); } else select([]); }
   else if (k === 'f') { if (S.sel.size) zoomTo([...S.sel]); }
   else if (k === 'i') isolateSel();
@@ -1040,6 +1044,289 @@ addEventListener('keydown', e => {
   else if (k === 'm') setMeasure(!S.measure);
   else if (k === 'x') $('#t-xray').click();
   else if (k === 'g') setGrid(!S.gridOn);
+});
+
+/* ================= issues / viewpoints（衝突檢視點） ================= */
+const ISSUE_STATUS = ['待處理', '處理中', '已解決', '不處理'];
+const STATUS_COLOR = { '待處理': '#e5484d', '處理中': '#e0a43b', '已解決': '#46a758', '不處理': '#8a94a0' };
+const LS_KEY = 'cdc-issues-local';
+S.issues = []; S.issueA = new Set(); S.issueB = new Set(); S.activeIssue = null; S.present = false;
+let issuesShared = [];
+let guidIndex = null;
+function gidOf(sub, guid) {
+  if (!guidIndex) { guidIndex = new Map(); S.elems.forEach((e, i) => guidIndex.set(S.subs[e.s].id + '|' + e.guid, i)); }
+  return guidIndex.get(sub + '|' + guid);
+}
+function loadLocalIssues() { try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch (e) { return {}; } }
+function saveLocalIssues(map) { try { localStorage.setItem(LS_KEY, JSON.stringify(map)); return true; } catch (e) { return false; } }
+function mergeIssues() {
+  const local = loadLocalIssues();
+  const byId = new Map(issuesShared.map(i => [i.id, { ...i, _src: 'shared' }]));
+  for (const [id, it] of Object.entries(local)) { if (it._deleted) byId.delete(id); else byId.set(id, { ...it, _src: byId.has(id) ? 'edited' : 'local' }); }
+  S.issues = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id, 'zh-Hant', { numeric: true }));
+}
+async function initIssues() {
+  try { const j = await fetchJSON('data/issues.json'); issuesShared = j.issues || []; } catch (e) { issuesShared = []; }
+  mergeIssues(); renderIssues();
+  const h = location.hash.slice(1);
+  if (/^issue-/.test(h)) { const it = S.issues.find(i => 'issue-' + i.id === h); if (it) openIssue(it); }
+}
+
+/* camera tween */
+let tween = null;
+function flyTo(pos, tgt, ms = 700) {
+  const p0 = camera.position.clone(), t0 = target.clone(), start = performance.now();
+  tween = { pos, tgt };
+  const step = now => {
+    if (tween === null || tween.pos !== pos) return;
+    const k = Math.min(1, (now - start) / ms), e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+    camera.position.lerpVectors(p0, pos, e); target.lerpVectors(t0, tgt, e); syncCameras(); redraw();
+    if (k < 1) requestAnimationFrame(step); else tween = null;
+  };
+  requestAnimationFrame(step);
+}
+
+async function openIssue(it, opts = {}) {
+  S.activeIssue = it;
+  const vp = it.viewpoint || {};
+  // submodels
+  if (vp.subs && vp.subs.length) {
+    const want = new Set(vp.subs);
+    const toLoad = S.subs.filter(s => want.has(s.id) && !s.loaded);
+    let k = 0;
+    for (const s of toLoad) { setLoad(`${it.id}：載入 ${s.name}`, k / toLoad.length); await loadSub(s, (f, m) => setLoad(`${it.id}：${s.name} ${m}`, (k + f) / toLoad.length)); k++; }
+    endLoad();
+    for (const s of S.subs) if (s.loaded) s.visible = want.has(s.id);
+    recomputeBBox(); renderSubList();
+  }
+  // elements
+  S.issueA.clear(); S.issueB.clear();
+  for (const r of it.elements || []) { const gi = gidOf(r.sub, r.guid); if (gi == null) continue; (r.role === 'B' ? S.issueB : S.issueA).add(gi); }
+  S.isolated = null; S.storeyMode = 'all'; S.sel.clear();
+  S.hidden.clear();
+  for (const r of vp.hidden || []) { const gi = gidOf(r.sub, r.guid); if (gi != null) S.hidden.add(gi); }
+  if (vp.classesOff) { const off = new Set(vp.classesOff); S.classes.forEach((c, i) => S.classOn.set(i, !off.has(c.name))); }
+  // section
+  if (vp.section) {
+    S.section.full.copy(S.bbox);
+    S.section.min.fromArray(vp.section.min); S.section.max.fromArray(vp.section.max);
+    S.section.full.union(new THREE.Box3(S.section.min.clone(), S.section.max.clone()));
+    setSection(true);
+  } else setSection(false);
+  // camera
+  if (vp.pos) {
+    if (!!vp.ortho !== (camera === ortho)) setOrtho(!!vp.ortho);
+    if (vp.orthoH) { orthoH = vp.orthoH; updateOrtho(); }
+    flyTo(new THREE.Vector3().fromArray(vp.pos), new THREE.Vector3().fromArray(vp.target), opts.instant ? 1 : 750);
+  } else if (S.issueA.size + S.issueB.size) zoomTo([...S.issueA, ...S.issueB]);
+  refreshStates(); renderClassList(); showProps(); renderIssueCard(); renderIssues();
+  try { history.replaceState(null, '', '#issue-' + it.id); } catch (e) {}
+}
+function closeIssue() {
+  S.activeIssue = null; S.issueA.clear(); S.issueB.clear(); refreshStates(); renderIssueCard(); renderIssues();
+  if (S.present) setPresent(false);
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+}
+
+/* left pane list */
+function renderIssues() {
+  const p = $('#p-iss'); if (!p) return;
+  const f = S.issueFilter || '全部';
+  const counts = {}; for (const i of S.issues) counts[i.status] = (counts[i.status] || 0) + 1;
+  p.innerHTML = '';
+  const top = el('div', 'btnrow');
+  const bPlay = el('button', 'sbtn on', '▶ 簡報模式'); bPlay.onclick = () => { const list = issueList(); if (list.length) { setPresent(true); openIssue(S.activeIssue && list.includes(S.activeIssue) ? S.activeIssue : list[0]); } };
+  const bNew = el('button', 'sbtn', '＋ 新增檢視點'); bNew.onclick = () => editIssue(null);
+  const bExp = el('button', 'sbtn', '匯出 / 匯入'); bExp.onclick = openExport;
+  top.append(bPlay, bNew, bExp); p.append(top);
+  const fr = el('div', 'btnrow');
+  for (const s of ['全部', ...ISSUE_STATUS]) {
+    const n = s === '全部' ? S.issues.length : (counts[s] || 0);
+    const b = el('button', 'sbtn' + (f === s ? ' on' : ''), `${s} ${n}`); b.onclick = () => { S.issueFilter = s; renderIssues(); }; fr.append(b);
+  }
+  p.append(fr);
+  const list = issueList();
+  if (!list.length) p.append(el('div', 'note', S.issues.length ? '此狀態沒有紀錄。' : '尚無衝突紀錄。調整好視角、剖切並選取衝突構件後，按「＋ 新增檢視點」。'));
+  for (const it of list) {
+    const c = el('div', 'icard' + (S.activeIssue && S.activeIssue.id === it.id ? ' on' : ''));
+    c.innerHTML = `<div class="ih"><b>${esc(it.id)}</b><span class="ist" style="--c:${STATUS_COLOR[it.status] || '#888'}">${esc(it.status || '')}</span>${it._src !== 'shared' ? `<span class="iloc" title="只存在這台電腦的瀏覽器，需匯出後才會分享">${it._src === 'edited' ? '已修改' : '本機'}</span>` : ''}</div>
+      <div class="it">${esc(it.title || '')}</div><div class="im">${esc([it.building, it.level, it.grid].filter(Boolean).join(' · '))}</div>`;
+    c.onclick = () => openIssue(it);
+    p.append(c);
+  }
+  p.append(el('div', 'note', '共用的紀錄來自 data/issues.json。在這裡新增或修改的內容只存在這台電腦的瀏覽器，請用「匯出」取得 JSON 後放回 repo 才會分享給其他人。'));
+}
+const issueList = () => S.issues.filter(i => !S.issueFilter || S.issueFilter === '全部' || i.status === S.issueFilter);
+
+/* floating card (slide-like) */
+function renderIssueCard() {
+  const c = $('#issuecard'); const it = S.activeIssue;
+  if (!it) { c.classList.remove('on'); $('#pnav').classList.remove('on'); return; }
+  c.classList.add('on');
+  const imgs = (it.images || []).map((src, i) => `<img src="${esc(src)}" data-i="${i}" alt="參考圖 ${i + 1}">`).join('');
+  const nA = S.issueA.size, nB = S.issueB.size, nMiss = (it.elements || []).length - nA - nB;
+  c.innerHTML = `<div class="ich"><div><div class="icid">問題紀錄-${esc(it.id)}</div><div class="icsub">${esc([it.level, it.building].filter(Boolean).join(''))}</div></div>
+      <div class="icbtn"><button class="sbtn" data-a="edit" title="編輯">編輯</button><button class="sbtn" data-a="close" title="關閉">✕</button></div></div>
+    <div class="ictitle">${esc(it.title || '')}</div>
+    <div class="kv ickv">
+      <div class="k">圖說編號名稱</div><div class="v">${esc(it.drawing || '—')}</div>
+      <div class="k">位置</div><div class="v">${esc(it.grid || '—')}</div>
+      <div class="k">問題</div><div class="v">${esc(it.problem || '—').replace(/\n/g, '<br>')}</div>
+      <div class="k">建議</div><div class="v sug">${esc(it.suggestion || '—').replace(/\n/g, '<br>')}</div>
+      <div class="k">狀態</div><div class="v"><span class="ist" style="--c:${STATUS_COLOR[it.status] || '#888'}">${esc(it.status || '—')}</span>${it.date ? ` <span style="color:var(--tx3)">${esc(it.date)}</span>` : ''}</div>
+      <div class="k">衝突構件</div><div class="v"><span class="lg a"></span>A ${nA}　<span class="lg b"></span>B ${nB}${nMiss > 0 ? `　<span style="color:var(--tx3)">（${nMiss} 個找不到）</span>` : ''}</div>
+    </div>${imgs ? `<div class="icimgs">${imgs}</div>` : ''}`;
+  c.querySelector('[data-a=close]').onclick = closeIssue;
+  c.querySelector('[data-a=edit]').onclick = () => editIssue(it);
+  c.querySelectorAll('.icimgs img').forEach(im => im.onclick = () => { $('#m-img .body').innerHTML = `<img src="${im.getAttribute('src')}" style="width:100%;display:block">`; $('#m-img').classList.add('on'); });
+  // presentation nav
+  const list = issueList(); const i = list.indexOf(it);
+  $('#pnav').classList.toggle('on', S.present);
+  $('#pnav .pc').textContent = `${it.id}　${i + 1} / ${list.length}`;
+}
+function stepIssue(d) { const list = issueList(); if (!list.length) return; const i = list.indexOf(S.activeIssue); openIssue(list[(i + d + list.length) % list.length]); }
+function setPresent(on) {
+  S.present = on; document.body.classList.toggle('present', on);
+  if (on && propsEl.classList.contains('on')) { propsEl.classList.remove('on'); $('#b-props').classList.remove('on'); }
+  resize(); renderIssueCard();
+}
+
+/* capture current state as viewpoint */
+function captureViewpoint() {
+  const r3 = v => v.toArray().map(x => Math.round(x * 1000) / 1000);
+  return {
+    pos: r3(camera.position), target: r3(target), ortho: camera === ortho, orthoH: Math.round(orthoH * 100) / 100,
+    section: S.section.on ? { min: r3(S.section.min), max: r3(S.section.max) } : null,
+    subs: S.subs.filter(s => s.loaded && s.visible).map(s => s.id),
+    hidden: [...S.hidden].slice(0, 3000).map(gi => ({ sub: S.subs[S.elems[gi].s].id, guid: S.elems[gi].guid })),
+    classesOff: S.classes.filter((c, i) => !S.classOn.get(i)).map(c => c.name),
+  };
+}
+function selectionAsElements(prev = []) {
+  const ids = S.sel.size ? [...S.sel] : [...S.issueA, ...S.issueB];
+  const old = new Map(prev.map(r => [r.sub + '|' + r.guid, r]));
+  return ids.map(gi => {
+    const e = S.elems[gi], sub = S.subs[e.s], key = sub.id + '|' + e.guid;
+    if (old.has(key)) return old.get(key);
+    return { sub: sub.id, guid: e.guid, role: sub.group === '機電' ? 'B' : 'A', note: (e.name || '').split(':')[0] };
+  });
+}
+function nextId() {
+  let n = 0; for (const i of S.issues) { const m = /^Q(\d+)$/.exec(i.id); if (m) n = Math.max(n, +m[1]); }
+  return 'Q' + String(n + 1).padStart(3, '0');
+}
+
+/* editor */
+function editIssue(it) {
+  const isNew = !it;
+  const st = S.storeys[[...S.sel].map(g => S.elems[g].st).find(x => x >= 0) ?? -1];
+  const draft = it ? JSON.parse(JSON.stringify(it)) : {
+    id: nextId(), title: '', building: '', level: st ? st.name.replace(/^[A-Z]+_/, '').replace(/\(.*$/, '') : '', drawing: '', grid: '',
+    problem: '', suggestion: '', status: '待處理', date: new Date().toISOString().slice(0, 10),
+    elements: selectionAsElements(), viewpoint: captureViewpoint(), images: [],
+  };
+  delete draft._src;
+  const m = $('#m-issue'), b = m.querySelector('.body');
+  m.querySelector('.ph span').textContent = isNew ? '新增衝突檢視點' : `編輯 ${draft.id}`;
+  const f = (k, lab, ph = '', ta = false) => `<label class="fl"><span>${lab}</span>${ta ? `<textarea data-k="${k}" rows="3" placeholder="${ph}">${esc(draft[k] || '')}</textarea>` : `<input data-k="${k}" value="${esc(draft[k] || '')}" placeholder="${ph}">`}</label>`;
+  b.innerHTML = `<div class="fgrid">
+      ${f('id', '編號', 'Q001')}${f('date', '日期', '2026-11-12')}
+      ${f('building', '棟別', '行政棟')}${f('level', '樓層', 'B1F')}
+    </div>
+    ${f('title', '標題', '控制室 W03 角窗與機電風管干涉')}
+    ${f('drawing', '圖說編號名稱', 'A2-02-03 地下一層平面圖-行政棟')}
+    ${f('grid', '位置（軸線）', 'LINE 1-2 / A-B')}
+    ${f('problem', '問題', '', true)}${f('suggestion', '建議', '', true)}
+    <label class="fl"><span>狀態</span><select data-k="status">${ISSUE_STATUS.map(s => `<option${s === draft.status ? ' selected' : ''}>${s}</option>`).join('')}</select></label>
+    <div class="fl"><span>衝突構件（A＝黃、B＝藍；點 A/B 切換）</span><div id="ie-els" class="ielist"></div>
+      <div class="btnrow" style="margin:6px 0 0"><button class="sbtn" data-a="els">改用目前選取的構件</button></div></div>
+    <div class="fl"><span>檢視點</span><div class="note" id="ie-vp" style="margin:0"></div>
+      <div class="btnrow" style="margin:6px 0 0"><button class="sbtn" data-a="vp">擷取目前視角與剖切</button><button class="sbtn" data-a="go">預覽這個視角</button></div></div>
+    <div class="fl"><span>參考圖（可多張，存在本機時會以內嵌圖片保存）</span><div class="icimgs" id="ie-imgs"></div><input type="file" accept="image/*" multiple id="ie-file"></div>
+    <div class="btnrow" style="justify-content:space-between;margin-top:12px">
+      <span>${isNew ? '' : '<button class="sbtn" data-a="del" style="color:#e5484d">刪除</button>'}</span>
+      <span style="display:flex;gap:6px"><button class="sbtn" data-close>取消</button><button class="sbtn on" data-a="save">儲存</button></span></div>`;
+  const drawEls = () => {
+    $('#ie-els').innerHTML = draft.elements.length ? draft.elements.map((r, i) => `<div class="ierow"><button class="rl ${r.role === 'B' ? 'b' : 'a'}" data-i="${i}">${r.role === 'B' ? 'B' : 'A'}</button><span class="l">${esc(r.note || r.guid)}</span><span class="r">${esc(r.sub)}</span><button class="x" data-x="${i}">✕</button></div>`).join('') : '<div class="note" style="margin:0">尚未指定。請在模型中選取構件（Ctrl+點選可多選）後按「改用目前選取的構件」。</div>';
+    $$('#ie-els .rl').forEach(x => x.onclick = () => { const r = draft.elements[+x.dataset.i]; r.role = r.role === 'B' ? 'A' : 'B'; drawEls(); });
+    $$('#ie-els .x').forEach(x => x.onclick = () => { draft.elements.splice(+x.dataset.x, 1); drawEls(); });
+  };
+  const drawVp = () => { const v = draft.viewpoint; $('#ie-vp').textContent = v ? `${v.ortho ? '正投影' : '透視'} · ${v.section ? '有剖切盒' : '無剖切'} · 顯示 ${v.subs.length} 個子模型 · 隱藏 ${(v.hidden || []).length} 個構件` : '尚未擷取'; };
+  const drawImgs = () => { $('#ie-imgs').innerHTML = (draft.images || []).map((s, i) => `<span class="imw"><img src="${esc(s)}"><button data-ri="${i}">✕</button></span>`).join(''); $$('#ie-imgs [data-ri]').forEach(x => x.onclick = () => { draft.images.splice(+x.dataset.ri, 1); drawImgs(); }); };
+  drawEls(); drawVp(); drawImgs();
+  b.querySelector('[data-a=els]').onclick = () => { draft.elements = selectionAsElements(draft.elements); drawEls(); };
+  b.querySelector('[data-a=vp]').onclick = () => { draft.viewpoint = captureViewpoint(); drawVp(); };
+  b.querySelector('[data-a=go]').onclick = () => { m.classList.remove('on'); openIssue({ ...draft, _src: 'local' }).then(() => m.classList.add('on')); };
+  $('#ie-file').onchange = async ev => {
+    for (const file of ev.target.files) {
+      const url = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(file); });
+      draft.images = draft.images || []; draft.images.push(await shrinkImage(url));
+    }
+    drawImgs();
+  };
+  const del = b.querySelector('[data-a=del]');
+  if (del) del.onclick = () => {
+    if (!del.dataset.sure) { del.dataset.sure = 1; del.textContent = '再按一次確認刪除'; return; }
+    const map = loadLocalIssues(); map[draft.id] = { _deleted: true }; saveLocalIssues(map);
+    m.classList.remove('on'); closeIssue(); mergeIssues(); renderIssues();
+  };
+  b.querySelector('[data-a=save]').onclick = () => {
+    b.querySelectorAll('[data-k]').forEach(inp => draft[inp.dataset.k] = inp.value.trim());
+    if (!draft.id) { b.querySelector('[data-k=id]').focus(); return; }
+    const map = loadLocalIssues();
+    if (it && it.id !== draft.id) map[it.id] = { _deleted: true };
+    map[draft.id] = draft;
+    if (!saveLocalIssues(map)) { alertNote('瀏覽器無法儲存（可能是私密模式或空間不足），請直接匯出 JSON。'); }
+    m.classList.remove('on'); mergeIssues();
+    openIssue(S.issues.find(i => i.id === draft.id), { instant: true });
+  };
+  m.classList.add('on');
+}
+function alertNote(t) { const n = $('#toast'); n.textContent = t; n.classList.add('on'); clearTimeout(alertNote.t); alertNote.t = setTimeout(() => n.classList.remove('on'), 3500); }
+async function shrinkImage(url, max = 1600) {
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+  const k = Math.min(1, max / Math.max(img.width, img.height));
+  const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', 0.85);
+}
+
+/* export / import */
+function exportJSON() {
+  const issues = S.issues.map(i => { const o = { ...i }; delete o._src; return o; });
+  return JSON.stringify({ version: 1, project: S.manifest.project, issues }, null, 2);
+}
+function openExport() {
+  const m = $('#m-export'), b = m.querySelector('.body');
+  const nLocal = S.issues.filter(i => i._src !== 'shared').length;
+  b.innerHTML = `<div class="note" style="margin:0 0 8px">目前共 ${S.issues.length} 筆，其中 ${nLocal} 筆是在這台電腦新增或修改的。把下方內容存成 <code>data/issues.json</code> 放回 repo，其他人重新整理後就會看到。</div>
+    <textarea id="exp-ta" rows="14" spellcheck="false">${esc(exportJSON())}</textarea>
+    <div class="btnrow" style="margin-top:8px"><button class="sbtn on" id="exp-copy">複製</button><a class="sbtn" id="exp-dl" download="issues.json">下載 issues.json</a>
+      <label class="sbtn" style="cursor:pointer">匯入 JSON…<input type="file" accept=".json,application/json" id="exp-imp" hidden></label>
+      <button class="sbtn" id="exp-reset" title="清除這台電腦上的新增與修改，回到共用版本">清除本機修改</button></div>`;
+  const blob = new Blob([exportJSON()], { type: 'application/json' }); $('#exp-dl').href = URL.createObjectURL(blob);
+  $('#exp-copy').onclick = async () => { try { await navigator.clipboard.writeText($('#exp-ta').value); alertNote('已複製到剪貼簿'); } catch (e) { $('#exp-ta').select(); alertNote('請按 Ctrl+C 複製已選取的內容'); } };
+  $('#exp-imp').onchange = async ev => {
+    const file = ev.target.files[0]; if (!file) return;
+    try {
+      const j = JSON.parse(await file.text()); const map = loadLocalIssues();
+      for (const it of j.issues || []) if (it && it.id) map[it.id] = it;
+      saveLocalIssues(map); mergeIssues(); renderIssues(); m.classList.remove('on'); alertNote(`已匯入 ${(j.issues || []).length} 筆`);
+    } catch (e) { alertNote('匯入失敗：不是有效的 issues JSON'); }
+  };
+  $('#exp-reset').onclick = ev => {
+    const btn = ev.target; if (!btn.dataset.sure) { btn.dataset.sure = 1; btn.textContent = '再按一次確認清除'; return; }
+    saveLocalIssues({}); mergeIssues(); renderIssues(); m.classList.remove('on'); alertNote('已清除本機修改');
+  };
+  m.classList.add('on');
+}
+$('#pnav .pp').onclick = () => stepIssue(-1);
+$('#pnav .pn').onclick = () => stepIssue(1);
+$('#pnav .px').onclick = () => setPresent(false);
+addEventListener('keydown', e => {
+  if (!S.present || ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+  if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); stepIssue(1); }
+  else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); stepIssue(-1); }
+  else if (e.key === 'Escape') setPresent(false);
 });
 
 init().catch(err => { console.error(err); setLoad('載入失敗：' + err.message, 0); });

@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "project": "CDC 衛福部防疫中心",
+  "issues": [
+    {
+      "id": "Q001",
+      "title": "控制室 W03 角窗與機電風管干涉",
+      "building": "行政棟",
+      "level": "B1F",
+      "drawing": "A2-02-03 地下一層平面圖-行政棟",
+      "grid": "LINE 1-2 / A-B",
+      "problem": "控制室 W03 角窗（模型：W-角窗-WA03，W505×H250，窗頂約 +8.58）與空調矩形風管及隔熱層（底 +8.43）干涉；同高程之消防管亦穿越窗頂。",
+      "suggestion": "路徑調整",
+      "status": "待處理",
+      "date": "2026-11-12",
+      "elements": [
+        {
+          "sub": "BASE",
+          "guid": "3B1Bjt5zr0hQV7_fcdsiI6",
+          "role": "A",
+          "note": "W-角窗-WA03"
+        },
+        {
+          "sub": "AC",
+          "guid": "3kcmQQknP9pQsELqTyFpdZ",
+          "role": "B",
+          "note": "矩形風管"
+        },
+        {
+          "sub": "AC",
+          "guid": "3kcmQQknP9pQsELqTyFpdz",
+          "role": "B",
+          "note": "風管隔熱層"
+        },
+        {
+          "sub": "FF",
+          "guid": "1eNo3vrT9DFgB1znbVLtJd",
+          "role": "B",
+          "note": "消防管"
+        },
+        {
+          "sub": "FF",
+          "guid": "1eNo3vrT9DFgB1znbVLtJq",
+          "role": "B",
+          "note": "消防管"
+        },
+        {
+          "sub": "FF",
+          "guid": "1eNo3vrT9DFgB1znbVLtJ0",
+          "role": "B",
+          "note": "消防管"
+        },
+        {
+          "sub": "FF",
+          "guid": "1eNo3vrT9DFgB1znbVLtJD",
+          "role": "B",
+          "note": "消防管"
+        }
+      ],
+      "viewpoint": {
+        "pos": [
+          41.6,
+          47.0,
+          10.9
+        ],
+        "target": [
+          47.9,
+          54.8,
+          7.6
+        ],
+        "ortho": false,
+        "orthoH": 12,
+        "section": {
+          "min": [
+            44.3,
+            51.2,
+            5.3
+          ],
+          "max": [
+            51.5,
+            57.6,
+            9.8
+          ]
+        },
+        "subs": [
+          "BASE",
+          "OFF",
+          "AC",
+          "FF"
+        ],
+        "hidden": [
+          {
+            "sub": "BASE",
+            "guid": "16w47mrS56WxvpK8_qMklb"
+          },
+          {
+            "sub": "BASE",
+            "guid": "2TRsjgSzTAKvmoPOVNFJVw"
+          },
+          {
+            "sub": "BASE",
+            "guid": "2TRsjgSzTAKvmoPOVNFJGZ"
+          },
+          {
+            "sub": "BASE",
+            "guid": "1blN1ImqD5rQ1lJfCDjRRI"
+          },
+          {
+            "sub": "BASE",
+            "guid": "3nKyxjerT7Wv7uEcdkorKs"
+          }
+        ],
+        "classesOff": [
+          "IfcSpace"
+        ]
+      },
+      "images": [
+        "data/issues/Q001.png"
+      ]
+    }
+  ]
+}
