@@ -139,6 +139,7 @@ function render() {
   // selected elements drawn last in xray mode
   renderer.render(scene, camera);
   updateLabels();
+  if (S.measure && S.measure.hover && snapMk.style.display !== 'none') { const sp = toScreen(S.measure.hover.p), vr = $('#view').getBoundingClientRect(); snapMk.style.left = (sp.x - vr.left) + 'px'; snapMk.style.top = (sp.y - vr.top) + 'px'; }
   // compass
   const v = new THREE.Vector3(); camera.getWorldDirection(v);
   const ang = Math.atan2(v.x, v.y);
@@ -838,26 +839,130 @@ function buildSecRows() {
 $('#sec-reset').onclick = () => { recomputeBBox(); S.section.full.copy(S.bbox); S.section.min.copy(S.bbox.min); S.section.max.copy(S.bbox.max); buildSecRows(); syncSection(); };
 $('#t-sec').onclick = () => { if (!S.section.on) { S.section.min.set(0, 0, 0); S.section.max.set(0, 0, 0); } setSection(!S.section.on); S.section.planCut = false; };
 
-/* ---- measure ---- */
-const mLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.LineBasicMaterial({ color: 0xef7a3c, depthTest: false }));
-mLine.renderOrder = 10; mLine.visible = false; mLine.frustumCulled = false; overlay.add(mLine);
-const mDots = new THREE.Points(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.PointsMaterial({ color: 0xffb27e, size: 7, sizeAttenuation: false, depthTest: false }));
-mDots.renderOrder = 11; mDots.visible = false; mDots.frustumCulled = false; overlay.add(mDots);
+/* ---- measure (Revit-style snapping) ---- */
+// snap priority: endpoint ▢ > midpoint △ > edge ✕ > surface ○ ; Shift = lock to X/Y/Z axis
+const mSegs = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xef7a3c, depthTest: false, transparent: true }));
+mSegs.renderOrder = 10; mSegs.frustumCulled = false; overlay.add(mSegs);
+const mDots = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0xef7a3c, size: 6, sizeAttenuation: false, depthTest: false }));
+mDots.renderOrder = 11; mDots.frustumCulled = false; overlay.add(mDots);
+const mEdge = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x3fa7ff, depthTest: false, linewidth: 2 }));
+mEdge.renderOrder = 12; mEdge.frustumCulled = false; mEdge.visible = false; overlay.add(mEdge);
 const measures = []; // {a,b}
+const SNAP_NAME = { end: '端點', mid: '中點', edge: '邊線', face: '表面' };
+const snapMk = el('div'); snapMk.id = 'snapmk'; $('#view').append(snapMk);
+const edgeCache = new Map();
+function featureEdges(gi) {
+  if (edgeCache.has(gi)) return edgeCache.get(gi);
+  const e = S.elems[gi]; const out = []; // flat: ax,ay,az,bx,by,bz
+  if (e.r) for (let q = 0; q < e.r.length; q += 6) {
+    const ch = S.chunks[e.r[q]], P = ch.pos, I = ch.idx, i0 = e.r[q + 3], n = e.r[q + 4];
+    const map = new Map(); const nrm = [];
+    const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
+    for (let t = i0, f = 0; t < i0 + n; t += 3, f++) {
+      va.fromArray(P, I[t] * 3); vb.fromArray(P, I[t + 1] * 3); vc.fromArray(P, I[t + 2] * 3);
+      const nn = vb.clone().sub(va).cross(vc.clone().sub(va)); const L = nn.length(); if (L < 1e-12) { nrm.push(null); continue; }
+      nrm.push(nn.divideScalar(L));
+      for (const [x, y] of [[I[t], I[t + 1]], [I[t + 1], I[t + 2]], [I[t + 2], I[t]]]) {
+        const k = x < y ? x * 4294967296 + y : y * 4294967296 + x;
+        const l = map.get(k); if (l) l.push(f); else map.set(k, [f]);
+      }
+    }
+    for (const [k, fs] of map) {
+      let keep = fs.length === 1;
+      if (!keep) { const n0 = nrm[fs[0]]; for (let j = 1; j < fs.length && !keep; j++) { const n1 = nrm[fs[j]]; if (n0 && n1 && Math.abs(n0.dot(n1)) < 0.866) keep = true; } }
+      if (!keep) continue;
+      const x = Math.floor(k / 4294967296), y = k % 4294967296;
+      out.push(P[x * 3], P[x * 3 + 1], P[x * 3 + 2], P[y * 3], P[y * 3 + 1], P[y * 3 + 2]);
+      if (out.length > 600000) break;
+    }
+  }
+  const arr = new Float32Array(out); edgeCache.set(gi, arr);
+  if (edgeCache.size > 60) edgeCache.delete(edgeCache.keys().next().value);
+  return arr;
+}
+function toScreen(v) { const r = canvas.getBoundingClientRect(); const p = v.clone().project(camera); return { x: (p.x + 1) / 2 * r.width + r.left, y: (1 - p.y) / 2 * r.height + r.top, ok: p.z <= 1 && p.z >= -1 }; }
+function snapAt(x, y) {
+  const id = pickId(x, y); if (id < 0) return null;
+  const face = hitPoint(id, x, y);
+  const E = featureEdges(id);
+  const A = new THREE.Vector3(), B = new THREE.Vector3(), M = new THREE.Vector3(), Q = new THREE.Vector3();
+  ray.setFromCamera(ndc(x, y), camera);
+  let best = null; const R_END = 12, R_MID = 10, R_EDGE = 7;
+  const consider = (kind, p, d, ea, eb) => {
+    const rank = { end: 0, mid: 1, edge: 2 }[kind];
+    if (!best || rank < best.rank || (rank === best.rank && d < best.d)) best = { kind, p: p.clone(), d, rank, ea: ea.clone(), eb: eb.clone() };
+  };
+  // occlusion guard: candidate must not be far behind the visible surface
+  const faceDist = face ? face.distanceTo(camera.position) : Infinity;
+  const visible = p => p.distanceTo(camera.position) <= faceDist * 1.02 + 0.05;
+  for (let i = 0; i < E.length; i += 6) {
+    A.fromArray(E, i); B.fromArray(E, i + 3);
+    const sa = toScreen(A), sb = toScreen(B);
+    const da = Math.hypot(sa.x - x, sa.y - y), db = Math.hypot(sb.x - x, sb.y - y);
+    if (da < R_END && visible(A)) consider('end', A, da, A, B);
+    if (db < R_END && visible(B)) consider('end', B, db, A, B);
+    if (best && best.rank === 0) continue;
+    M.copy(A).add(B).multiplyScalar(0.5); const sm = toScreen(M); const dm = Math.hypot(sm.x - x, sm.y - y);
+    if (dm < R_MID && visible(M)) consider('mid', M, dm, A, B);
+    if (best && best.rank <= 1) continue;
+    ray.ray.distanceSqToSegment(A, B, null, Q); const sq = toScreen(Q); const dq = Math.hypot(sq.x - x, sq.y - y);
+    if (dq < R_EDGE && visible(Q)) consider('edge', Q, dq, A, B);
+  }
+  if (best) return { id, kind: best.kind, p: best.p, ea: best.ea, eb: best.eb };
+  return face ? { id, kind: 'face', p: face } : null;
+}
+function lockAxis(a, b) {
+  const d = b.clone().sub(a); const ax = Math.abs(d.x), ay = Math.abs(d.y), az = Math.abs(d.z);
+  const r = a.clone(); if (ax >= ay && ax >= az) r.x = b.x; else if (ay >= az) r.y = b.y; else r.z = b.z; return r;
+}
 function setMeasure(on) {
-  S.measure = on ? { a: null } : null; $('#t-meas').classList.toggle('on', on);
-  $('#measure-tip').style.display = on ? 'block' : 'none'; $('#measure-tip').textContent = '量測：點選第一點（Esc 結束）';
-  if (!on) { measures.length = 0; mLine.visible = mDots.visible = false; redraw(); }
+  S.measure = on ? { a: null, hover: null } : null; $('#t-meas').classList.toggle('on', on);
+  $('#measure-tip').style.display = on ? 'flex' : 'none'; tipText();
+  if (!on) { measures.length = 0; snapMk.style.display = 'none'; mEdge.visible = false; drawMeasures(); }
+  canvas.style.cursor = on ? 'crosshair' : '';
+}
+function tipText() {
+  if (!S.measure) return;
+  const h = S.measure.hover;
+  const st = h ? `　<b>${SNAP_NAME[h.kind]}</b>` : '';
+  $('#measure-tip').innerHTML = `<span>${S.measure.a ? '量測：點選第二點' : '量測：點選第一點'}${st}</span><span class="mt-hint">▢端點 △中點 ✕邊線 ○表面 · Shift 鎖定軸向 · Esc 取消</span>` + (measures.length ? `<button class="mt-clear">清除 ${measures.length} 筆</button>` : '');
+  const c = $('#measure-tip .mt-clear'); if (c) c.onclick = ev => { ev.stopPropagation(); measures.length = 0; drawMeasures(); tipText(); };
+}
+let hoverRAF = 0, lastHoverEvt = null, shiftDown = false;
+function measureHover(e) {
+  lastHoverEvt = e; shiftDown = e.shiftKey;
+  if (hoverRAF) return;
+  hoverRAF = requestAnimationFrame(() => {
+    hoverRAF = 0; if (!S.measure || !lastHoverEvt) return;
+    const ev = lastHoverEvt; const sn = snapAt(ev.clientX, ev.clientY);
+    S.measure.hover = sn;
+    if (sn && S.measure.a && shiftDown) sn.p = lockAxis(S.measure.a, sn.p);
+    if (sn) {
+      const sp = toScreen(sn.p); const vr = $('#view').getBoundingClientRect();
+      snapMk.className = 'snap-' + sn.kind; snapMk.style.display = 'block';
+      snapMk.style.left = (sp.x - vr.left) + 'px'; snapMk.style.top = (sp.y - vr.top) + 'px';
+      if (sn.ea && sn.kind !== 'face') { mEdge.geometry.setFromPoints([sn.ea, sn.eb]); mEdge.visible = true; } else mEdge.visible = false;
+    } else { snapMk.style.display = 'none'; mEdge.visible = false; }
+    drawMeasures(); tipText();
+  });
 }
 function measureClick(e) {
-  const { p } = pickPoint(e.clientX, e.clientY); if (!p) return;
-  if (!S.measure.a) { S.measure.a = p; measures.length = 0; drawMeasure(p, p); $('#measure-tip').textContent = '量測：點選第二點'; }
-  else { measures.push({ a: S.measure.a, b: p }); drawMeasure(S.measure.a, p); S.measure.a = null; $('#measure-tip').textContent = '量測：點選第一點開始新量測（Esc 結束）'; }
+  const sn = S.measure.hover && S.measure.hover.p ? S.measure.hover : snapAt(e.clientX, e.clientY);
+  if (!sn) return;
+  let p = sn.p.clone();
+  if (S.measure.a && e.shiftKey) p = lockAxis(S.measure.a, p);
+  if (!S.measure.a) S.measure.a = p;
+  else { measures.push({ a: S.measure.a, b: p }); S.measure.a = null; }
+  drawMeasures(); tipText();
 }
-function measureHover() {}
-function drawMeasure(a, b) {
-  mLine.geometry.setFromPoints([a, b]); mDots.geometry.setFromPoints([a, b]);
-  mLine.visible = mDots.visible = true; redraw();
+function drawMeasures() {
+  const pts = [], dots = [];
+  for (const m of measures) { pts.push(m.a, m.b); dots.push(m.a, m.b); }
+  const h = S.measure && S.measure.hover;
+  if (S.measure && S.measure.a) { dots.push(S.measure.a); if (h) pts.push(S.measure.a, h.p); }
+  mSegs.geometry.dispose(); mSegs.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+  mDots.geometry.dispose(); mDots.geometry = new THREE.BufferGeometry().setFromPoints(dots);
+  redraw();
 }
 $('#t-meas').onclick = () => setMeasure(!S.measure);
 
@@ -880,19 +985,18 @@ $('#t-grid').onclick = () => setGrid(!S.gridOn);
 const labelsEl = $('#labels'); const labelPool = [];
 function updateLabels() {
   let k = 0; const r = canvas.getBoundingClientRect();
-  const put = (cls, text, v) => {
+  const put = (cls, text, v, html) => {
     const p = v.clone().project(camera); if (p.z > 1 || p.z < -1) return;
     const x = (p.x + 1) / 2 * r.width, y = (1 - p.y) / 2 * r.height; if (x < -40 || y < -40 || x > r.width + 40 || y > r.height + 40) return;
     let d = labelPool[k]; if (!d) { d = el('div'); labelPool.push(d); labelsEl.append(d); }
-    d.className = cls; d.textContent = text; d.style.left = x + 'px'; d.style.top = y + 'px'; d.style.display = ''; k++;
+    d.className = cls; if (html) d.innerHTML = text; else d.textContent = text; d.style.left = x + 'px'; d.style.top = y + 'px'; d.style.display = ''; k++;
   };
-  if (S.measure || measures.length) {
-    const list = measures.length ? measures : [];
-    for (const m of list) {
-      const d = m.b.clone().sub(m.a);
-      put('mlabel', `${d.length().toFixed(3)} m  (Δx ${Math.abs(d.x).toFixed(2)} Δy ${Math.abs(d.y).toFixed(2)} Δz ${Math.abs(d.z).toFixed(2)})`, m.a.clone().add(m.b).multiplyScalar(0.5));
-    }
-  }
+  const mlab = (a, b, live) => {
+    const d = b.clone().sub(a); const L = d.length(); if (L < 1e-6) return;
+    put('mlabel' + (live ? ' live' : ''), `<b>${(L * 1000).toFixed(0)} mm</b><span>ΔX ${(Math.abs(d.x) * 1000).toFixed(0)}　ΔY ${(Math.abs(d.y) * 1000).toFixed(0)}　ΔZ ${(Math.abs(d.z) * 1000).toFixed(0)}</span>`, a.clone().add(b).multiplyScalar(0.5), true);
+  };
+  for (const m of measures) mlab(m.a, m.b, false);
+  if (S.measure && S.measure.a && S.measure.hover) mlab(S.measure.a, S.measure.hover.p, true);
   if (S.gridOn && S.manifest) {
     const z = S.manifest.gridZ ?? 0; const seen = new Set();
     for (const [tag, a, b] of S.manifest.grids) {
@@ -924,7 +1028,7 @@ $('#compass').onclick = () => viewPreset('top');
 addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   const k = e.key.toLowerCase();
-  if (k === 'escape') { $$('.modal').forEach(m => m.classList.remove('on')); if (S.measure) setMeasure(false); else select([]); }
+  if (k === 'escape') { $$('.modal').forEach(m => m.classList.remove('on')); if (S.measure) { if (S.measure.a) { S.measure.a = null; drawMeasures(); tipText(); } else setMeasure(false); } else select([]); }
   else if (k === 'f') { if (S.sel.size) zoomTo([...S.sel]); }
   else if (k === 'i') isolateSel();
   else if (k === 'h') hideSel();
