@@ -19,4 +19,8 @@
 python3 tools/convert.py <檔案.ifc> out/<ID> <ID>   # 每個 IFC 一次（見 tools/runall.sh）
 python3 tools/build_site.py                          # 組裝 site/data 與 manifest
 ```
+「地形.ifc」（施工場佈：開挖支撐、構台、起重機與施工機具）原檔未設定共用座標（基地仍為預設位置），轉換時以連續壁與支撐圍令比對，整體平移 E +310,044.2 / N +2,771,336.3 m（高程不變）：
+```
+SHIFT=310044.2,2771336.3,0 MANUAL=BREP THREADS=1 python3 tools/convert.py 地形.ifc out/TOPO TOPO
+```
 未納入：「整合MEP-SD（機電疑義管制總表）整合」469 MB（與六個機電分項檔重複）。
