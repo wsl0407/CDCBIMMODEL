@@ -9,6 +9,8 @@ import ifcopenshell, ifcopenshell.geom
 import ifcopenshell.util.placement as uplace
 
 ORIGIN = np.array([310000.0, 2771300.0, 0.0])
+SHIFT = np.array([float(x) for x in os.environ.get("SHIFT", "0,0,0").split(",")])  # added to raw world coords (m)
+MANUAL = tuple(x for x in os.environ.get("MANUAL", "").split(",") if x)  # classes read directly from faceted breps
 
 src, outdir, sub_id = sys.argv[1], sys.argv[2], sys.argv[3]
 os.makedirs(outdir, exist_ok=True)
@@ -160,7 +162,42 @@ s = ifcopenshell.geom.settings()
 s.set("use-world-coords", False)
 s.set("weld-vertices", True)
 s.set("apply-default-materials", True)
-it = ifcopenshell.geom.iterator(s, f, 2, exclude=("IfcOpeningElement", "IfcAnnotation", "IfcVirtualElement", "IfcGrid"))
+def _has_brep(p):
+    if not p.Representation:
+        return False
+    for r in p.Representation.Representations:
+        for it_ in r.Items:
+            its = list(it_.MappingSource.MappedRepresentation.Items) if it_.is_a("IfcMappedItem") else [it_]
+            if any(x.is_a("IfcFacetedBrep") for x in its):
+                return True
+    return False
+BREP_PRODUCTS = []
+if MANUAL == ("BREP",):
+    skip = {"IfcOpeningElement", "IfcAnnotation", "IfcVirtualElement", "IfcGrid"}
+    rest = []
+    for p_ in f.by_type("IfcProduct"):
+        if p_.is_a() in skip or p_.is_a("IfcSpatialStructureElement") and not p_.is_a("IfcSite"):
+            continue
+        (BREP_PRODUCTS if _has_brep(p_) else rest).append(p_)
+    rest = [p_ for p_ in rest if p_.Representation]
+    print("brep products", len(BREP_PRODUCTS), "others", len(rest), flush=True)
+    class _OneByOne:
+        """iterator-compatible: builds each product separately so memory is released."""
+        def __init__(self, prods): self.prods = prods; self.k = -1; self.cur = None
+        def initialize(self): return self.next()
+        def get(self): return self.cur
+        def next(self):
+            while True:
+                self.k += 1
+                if self.k >= len(self.prods): return False
+                try:
+                    self.cur = ifcopenshell.geom.create_shape(s, self.prods[self.k])
+                    return True
+                except Exception:
+                    continue
+    it = _OneByOne(rest)
+else:
+    it = ifcopenshell.geom.iterator(s, f, int(os.environ.get("THREADS", "2")), exclude=("IfcOpeningElement", "IfcAnnotation", "IfcVirtualElement", "IfcGrid") + MANUAL)
 ok = it.initialize()
 
 materials = [(190, 190, 190, 255)]   # [r,g,b,a]; 0 = default
@@ -195,6 +232,32 @@ def material_index(m):
         i = len(materials); materials.append(key); mat_idx[key] = i
     return i
 
+def add_elem(prod):
+    eid = prod.id()
+    c = prod.is_a()
+    if c not in cls_idx:
+        cls_idx[c] = len(cls_names); cls_names.append(c)
+    ty = etype.get(eid)
+    st = storey_of(prod)
+    ps = list(epsets.get(eid, []))
+    if ty is not None:
+        for p in (ty.HasPropertySets or []):
+            i = pset_id(p)
+            if i is not None:
+                ps.append(i)
+    elem_of[eid] = len(elements)
+    elements.append([
+        prod.GlobalId,
+        cls_idx[c],
+        S(prod.Name),
+        S((ty.Name if ty is not None else None) or getattr(prod, "ObjectType", None)),
+        storey_idx.get(st.id(), -1) if st is not None and st.is_a("IfcBuildingStorey") else -1,
+        S(getattr(prod, "Tag", None)),
+        S(" / ".join(emat.get(eid) or (emat.get(ty.id()) if ty is not None else None) or [])),
+        ps,
+    ])
+    return elem_of[eid]
+
 n = 0
 while ok:
     sh = it.get()
@@ -206,28 +269,7 @@ while ok:
     except Exception:
         prod = None
     if eid not in elem_of and prod is not None:
-        c = prod.is_a()
-        if c not in cls_idx:
-            cls_idx[c] = len(cls_names); cls_names.append(c)
-        ty = etype.get(eid)
-        st = storey_of(prod)
-        ps = list(epsets.get(eid, []))
-        if ty is not None:
-            for p in (ty.HasPropertySets or []):
-                i = pset_id(p)
-                if i is not None:
-                    ps.append(i)
-        elem_of[eid] = len(elements)
-        elements.append([
-            prod.GlobalId,
-            cls_idx[c],
-            S(prod.Name),
-            S((ty.Name if ty is not None else None) or getattr(prod, "ObjectType", None)),
-            storey_idx.get(st.id(), -1) if st is not None and st.is_a("IfcBuildingStorey") else -1,
-            S(getattr(prod, "Tag", None)),
-            S(" / ".join(emat.get(eid) or (emat.get(ty.id()) if ty is not None else None) or [])),
-            ps,
-        ])
+        add_elem(prod)
     if eid not in elem_of:
         if not it.next():
             break
@@ -260,7 +302,7 @@ while ok:
         m = np.array(sh.transformation.matrix, dtype=np.float64).reshape(4, 4).T  # row-major
         # bake mesh dequant offset into instance: world = R*(mn + sc*u) + t
         meshinfo = meshes[mi]
-        R = m[:3, :3]; t = m[:3, 3] - ORIGIN
+        R = m[:3, :3]; t = m[:3, 3] + SHIFT - ORIGIN
         instances.append((elem_of[eid], mi, R, t))
         tri_total += sum(len(p[2]) // 3 for p in meshinfo[2])
     if n % 5000 == 0:
@@ -269,6 +311,120 @@ while ok:
         break
 
 print("geometry done", n, "shapes", len(meshes), "meshes", len(instances), "inst", tri_total, "tris", round(time.time() - t0), "s", flush=True)
+
+
+# ---------- manual faceted-brep pass (huge terrain etc.) ----------
+if MANUAL:
+    import mapbox_earcut as earcut
+    style_rgba = {}
+    for si in f.by_type("IfcStyledItem"):
+        if si.Item is None:
+            continue
+        for sa in si.Styles or []:
+            sty = sa.Styles if sa.is_a("IfcPresentationStyleAssignment") else [sa]
+            for ss in sty:
+                if ss.is_a("IfcSurfaceStyle"):
+                    for el_ in ss.Styles:
+                        if el_.is_a("IfcSurfaceStyleShading"):
+                            c_ = el_.SurfaceColour
+                            tr = getattr(el_, "Transparency", None) or 0.0
+                            style_rgba[si.Item.id()] = (round(c_.Red * 255), round(c_.Green * 255), round(c_.Blue * 255), round((1 - tr) * 255))
+    def mat_of_item(item):
+        key = style_rgba.get(item.id(), (150, 140, 120, 255))
+        i = mat_idx.get(key)
+        if i is None:
+            i = len(materials); materials.append(key); mat_idx[key] = i
+        return i
+    def tri_face(face, P, pidx, tris):
+        rings = []
+        for b in face.Bounds:
+            loop = b.Bound
+            if not loop.is_a("IfcPolyLoop"):
+                continue
+            ids_ = []
+            for pt in loop.Polygon:
+                k = pt.id()
+                j = pidx.get(k)
+                if j is None:
+                    j = len(P); pidx[k] = j; P.append(pt.Coordinates)
+                ids_.append(j)
+            if b.is_a("IfcFaceOuterBound"):
+                rings.insert(0, ids_)
+            else:
+                rings.append(ids_)
+        if not rings or len(rings[0]) < 3:
+            return
+        if len(rings) == 1 and len(rings[0]) == 3:
+            tris.extend(rings[0]); return
+        if len(rings) == 1 and len(rings[0]) == 4:
+            a, b_, c_, d = rings[0]; tris.extend((a, b_, c_, a, c_, d)); return
+        allids = [j for r in rings for j in r]
+        V = np.array([P[j] for j in allids], float)
+        nrm = np.zeros(3)
+        o = rings[0]
+        for i in range(len(o)):
+            p0 = np.array(P[o[i]], float); p1 = np.array(P[o[(i + 1) % len(o)]], float)
+            nrm += np.array([(p0[1] - p1[1]) * (p0[2] + p1[2]), (p0[2] - p1[2]) * (p0[0] + p1[0]), (p0[0] - p1[0]) * (p0[1] + p1[1])])
+        ax = int(np.argmax(np.abs(nrm)))
+        V2 = np.delete(V, ax, axis=1)
+        ends = np.cumsum([len(r) for r in rings]).astype(np.uint32)
+        try:
+            t_ = earcut.triangulate_float64(V2, ends)
+        except Exception:
+            t_ = []
+        tris.extend(allids[k] for k in t_)
+    manual_tris = 0
+    todo = BREP_PRODUCTS if MANUAL == ("BREP",) else [p_ for cls in MANUAL for p_ in f.by_type(cls) if p_.is_a() == cls]
+    for k_, prod in enumerate(todo):
+        if True:
+            if prod.Representation is None:
+                continue
+            try:
+                M = np.array(uplace.get_local_placement(prod.ObjectPlacement), float)
+            except Exception:
+                M = np.eye(4)
+            items = []
+            for rep in prod.Representation.Representations:
+                if rep.RepresentationIdentifier not in ("Body", None):
+                    continue
+                for it_ in rep.Items:
+                    if it_.is_a("IfcFacetedBrep"):
+                        items.append(it_)
+                    elif it_.is_a("IfcMappedItem"):
+                        for it2 in it_.MappingSource.MappedRepresentation.Items:
+                            if it2.is_a("IfcFacetedBrep"):
+                                items.append(it2)
+                    elif it_.is_a("IfcShellBasedSurfaceModel"):
+                        items.append(it_)
+            if not items:
+                continue
+            ei = elem_of.get(prod.id())
+            if ei is None:
+                ei = add_elem(prod)
+            for item in items:
+                P = []; pidx = {}; tris = []
+                shells = [item.Outer] if item.is_a("IfcFacetedBrep") else list(item.SbsmBoundary)
+                for sh_ in shells:
+                    faces = sh_.CfsFaces
+                    for face in faces:
+                        tri_face(face, P, pidx, tris)
+                if not tris:
+                    continue
+                v = np.array(P, float)
+                v = v * len_scale
+                v = (np.c_[v, np.ones(len(v))] @ np.array(M).T)[:, :3] if False else v
+                Mw = M.copy(); Mw[:3, 3] *= len_scale
+                v = v @ Mw[:3, :3].T + Mw[:3, 3] + SHIFT - ORIGIN
+                mn = v.min(0); sc = v.max(0) - mn; sc[sc == 0] = 1e-6
+                q = np.round((v - mn) / sc * 65535 - 32768).clip(-32768, 32767).astype(np.int16)
+                ind = np.array(tris, np.uint32)
+                mi = len(meshes)
+                meshes.append((mn, sc, [(mat_of_item(item), q, ind)]))
+                instances.append((ei, mi, np.eye(3), np.zeros(3)))
+                tri_total += len(ind) // 3; manual_tris += len(ind) // 3
+            if k_ % 100 == 0:
+                print("  manual", k_, "/", len(todo), "tris so far", manual_tris, round(time.time() - t0), "s", flush=True)
+    print("manual pass done", manual_tris, "tris", flush=True)
 
 # ---------- grids ----------
 grids = []
